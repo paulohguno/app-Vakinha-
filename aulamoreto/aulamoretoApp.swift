@@ -1,17 +1,12 @@
-//
-//  aulamoretoApp.swift
-//  aulamoreto
-//
-//  Created by paulo henrique garbo on 24/09/26.
-//
-
 import SwiftUI
 
 @main
 struct aulamoretoApp: App {
+    @StateObject private var vm = AppViewModel.shared
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(vm: vm)
         }
     }
 }

@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA00000000000000000000B1 /* PostgresNIO in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000000D1 /* PostgresNIO */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		03B9380B3065DB7B00B71487 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA00000000000000000000B1 /* PostgresNIO in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = aulamoreto;
 			packageProductDependencies = (
+				AA00000000000000000000D1 /* PostgresNIO */,
 			);
 			productName = aulamoreto;
 			productReference = 03B937FA3065DB7A00B71487 /* aulamoreto.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = 03B937F13065DB7A00B71487;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA00000000000000000000C1 /* XCRemoteSwiftPackageReference "postgres-nio" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 03B937FB3065DB7A00B71487 /* Products */;
 			projectDirPath = "";
@@ -552,6 +561,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA00000000000000000000C1 /* XCRemoteSwiftPackageReference "postgres-nio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/vapor/postgres-nio.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.21.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA00000000000000000000D1 /* PostgresNIO */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00000000000000000000C1 /* XCRemoteSwiftPackageReference "postgres-nio" */;
+			productName = PostgresNIO;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 03B937F23065DB7A00B71487 /* Project object */;
 }

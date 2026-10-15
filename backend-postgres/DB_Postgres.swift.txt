@@ -1,0 +1,283 @@
+import Foundation
+import PostgresNIO
+
+// Banco padrão do PostgreSQL. No simulador "localhost" é o próprio Mac;
+// em iPhone físico troque pelo IP do Mac na rede (ex.: "192.168.0.10").
+enum DBConfig {
+    static let host = "localhost"
+    static let port = 5432
+    static let user = "postgres"
+    static let password = "postgres"
+    static let database = "postgres"
+}
+
+struct Usuario: Identifiable, Hashable { let id: Int; let nome, email, perfil: String; let verificado: Bool }
+struct Categoria: Identifiable, Hashable { let id: Int; let nome: String }
+struct Campanha: Identifiable, Hashable {
+    let id, criadorId: Int
+    let titulo, descricao, cidade, status, categoria, criador: String
+    let meta, arrecadado: Double
+    var progresso: Double { min(arrecadado / meta, 1) }
+}
+struct Doacao: Identifiable { let id: Int; let campanha: String; let valor: Double; let metodo: String; let data: Date }
+struct Post: Identifiable { let id: Int; let autor, texto: String; let data: Date } // novidade ou mensagem do mural
+struct Item: Identifiable { let id: Int; let titulo, detalhe, status: String } // filas admin, saques, notificações
+
+@MainActor
+final class DB: ObservableObject {
+    static let shared = DB()
+    let client = PostgresClient(configuration: .init(
+        host: DBConfig.host, port: DBConfig.port, username: DBConfig.user,
+        password: DBConfig.password, database: DBConfig.database, tls: .disable))
+    @Published var usuario: Usuario?
+    @Published var erro: String?
+
+    private init() { Task { await client.run() } }
+
+    // Executa a ação e publica o erro na UI em vez de lançar.
+    @discardableResult
+    func tentar<T>(_ acao: () async throws -> T) async -> T? {
+        do { return try await acao() } catch {
+            erro = String(reflecting: error); return nil
+        }
+    }
+
+    // MARK: Autenticação (RF01/RF02)
+    func login(email: String, senha: String) async throws -> Bool {
+        let rows = try await client.query("""
+            SELECT id, nome, email, perfil, verificado FROM usuarios
+            WHERE email = \(email) AND senha_hash = crypt(\(senha), senha_hash)
+            """)
+        for try await (id, nome, email, perfil, ver) in rows.decode((Int, String, String, String, Bool).self) {
+            usuario = Usuario(id: id, nome: nome, email: email, perfil: perfil, verificado: ver)
+        }
+        return usuario != nil
+    }
+
+    func cadastrar(nome: String, email: String, senha: String) async throws -> Bool {
+        try await client.query("""
+            INSERT INTO usuarios (nome, email, senha_hash) VALUES (\(nome), \(email), crypt(\(senha), gen_salt('bf')))
+            """)
+        return try await login(email: email, senha: senha)
+    }
+
+    func atualizarPerfil(nome: String) async throws {
+        guard let u = usuario else { return }
+        try await client.query("UPDATE usuarios SET nome = \(nome) WHERE id = \(u.id)")
+        usuario = Usuario(id: u.id, nome: nome, email: u.email, perfil: u.perfil, verificado: u.verificado)
+    }
+
+    // MARK: Categorias
+    func categorias() async throws -> [Categoria] {
+        var r: [Categoria] = []
+        for try await (id, nome) in try await client.query("SELECT id, nome FROM categorias ORDER BY nome").decode((Int, String).self) {
+            r.append(Categoria(id: id, nome: nome))
+        }
+        return r
+    }
+
+    // MARK: Campanhas (RF03/RF04/RF09)
+    private let campanhaSQL = """
+        SELECT c.id, c.criador_id, c.titulo, c.descricao, c.cidade, c.status,
+               COALESCE(cat.nome, ''), u.nome, c.meta::float8,
+               COALESCE((SELECT sum(valor) FROM doacoes d WHERE d.campanha_id = c.id), 0)::float8
+        FROM campanhas c JOIN usuarios u ON u.id = c.criador_id
+        LEFT JOIN categorias cat ON cat.id = c.categoria_id
+        """
+
+    private func campanhas(_ q: PostgresQuery) async throws -> [Campanha] {
+        var r: [Campanha] = []
+        let rows = try await client.query(q)
+        for try await (id, cid, t, d, cidade, st, cat, cri, meta, arr) in
+            rows.decode((Int, Int, String, String, String, String, String, String, Double, Double).self) {
+            r.append(Campanha(id: id, criadorId: cid, titulo: t, descricao: d, cidade: cidade, status: st,
+                              categoria: cat, criador: cri, meta: meta, arrecadado: arr))
+        }
+        return r
+    }
+
+    func feed(busca: String, categoria: Int?) async throws -> [Campanha] {
+        let like = "%\(busca)%"
+        return try await campanhas(PostgresQuery(unsafeSQL: campanhaSQL + """
+             WHERE c.status = 'ativa' AND (c.titulo ILIKE $1 OR c.cidade ILIKE $1)
+               AND ($2::bigint IS NULL OR c.categoria_id = $2) ORDER BY c.criada_em DESC
+            """, binds: try binds(like, categoria)))
+    }
+
+    func minhasCampanhas() async throws -> [Campanha] {
+        try await campanhas(PostgresQuery(unsafeSQL: campanhaSQL + " WHERE c.criador_id = $1 ORDER BY c.criada_em DESC",
+                                          binds: try binds(usuario?.id ?? 0)))
+    }
+
+    func favoritos() async throws -> [Campanha] {
+        try await campanhas(PostgresQuery(unsafeSQL: campanhaSQL + " JOIN favoritos f ON f.campanha_id = c.id WHERE f.usuario_id = $1",
+                                          binds: try binds(usuario?.id ?? 0)))
+    }
+
+    func salvarCampanha(id: Int?, titulo: String, descricao: String, meta: Double, cidade: String, categoria: Int?) async throws {
+        guard let u = usuario else { return }
+        if let id {
+            try await client.query("""
+                UPDATE campanhas SET titulo = \(titulo), descricao = \(descricao), meta = \(meta),
+                cidade = \(cidade), categoria_id = \(categoria) WHERE id = \(id) AND criador_id = \(u.id)
+                """)
+        } else {
+            try await client.query("""
+                INSERT INTO campanhas (criador_id, titulo, descricao, meta, cidade, categoria_id)
+                VALUES (\(u.id), \(titulo), \(descricao), \(meta), \(cidade), \(categoria))
+                """)
+        }
+    }
+
+    func mudarStatus(_ c: Campanha, _ status: String) async throws {
+        try await client.query("UPDATE campanhas SET status = \(status) WHERE id = \(c.id)")
+    }
+
+    func excluir(_ c: Campanha) async throws {
+        try await client.query("DELETE FROM campanhas WHERE id = \(c.id)")
+    }
+
+    // MARK: Doações (RF05)
+    func doar(_ c: Campanha, valor: Double, metodo: String) async throws {
+        guard let u = usuario else { return }
+        try await client.query("INSERT INTO doacoes (campanha_id, doador_id, valor, metodo) VALUES (\(c.id), \(u.id), \(valor), \(metodo))")
+    }
+
+    func historico() async throws -> [Doacao] {
+        var r: [Doacao] = []
+        let rows = try await client.query("""
+            SELECT d.id, c.titulo, d.valor::float8, d.metodo, d.criada_em FROM doacoes d
+            JOIN campanhas c ON c.id = d.campanha_id WHERE d.doador_id = \(usuario?.id ?? 0) ORDER BY d.criada_em DESC
+            """)
+        for try await (id, t, v, m, dt) in rows.decode((Int, String, Double, String, Date).self) {
+            r.append(Doacao(id: id, campanha: t, valor: v, metodo: m, data: dt))
+        }
+        return r
+    }
+
+    // MARK: Mural e novidades (RF06/RF07)
+    func mensagens(_ c: Campanha) async throws -> [Post] {
+        try await posts("""
+            SELECT m.id, u.nome, m.texto, m.criada_em FROM mensagens m JOIN usuarios u ON u.id = m.autor_id
+            WHERE m.campanha_id = \(c.id) ORDER BY m.criada_em DESC
+            """)
+    }
+
+    func novidades(_ c: Campanha) async throws -> [Post] {
+        try await posts("""
+            SELECT id, COALESCE(anexo_url, ''), texto, criada_em FROM novidades
+            WHERE campanha_id = \(c.id) ORDER BY criada_em DESC
+            """)
+    }
+
+    private func posts(_ q: PostgresQuery) async throws -> [Post] {
+        var r: [Post] = []
+        for try await (id, a, t, d) in try await client.query(q).decode((Int, String, String, Date).self) {
+            r.append(Post(id: id, autor: a, texto: t, data: d))
+        }
+        return r
+    }
+
+    func enviarMensagem(_ c: Campanha, _ texto: String) async throws {
+        try await client.query("INSERT INTO mensagens (campanha_id, autor_id, texto) VALUES (\(c.id), \(usuario?.id ?? 0), \(texto))")
+    }
+
+    func excluirMensagem(_ id: Int) async throws {
+        try await client.query("DELETE FROM mensagens WHERE id = \(id)")
+    }
+
+    func publicarNovidade(_ c: Campanha, _ texto: String, anexo: String) async throws {
+        let a: String? = anexo.isEmpty ? nil : anexo
+        try await client.query("INSERT INTO novidades (campanha_id, texto, anexo_url) VALUES (\(c.id), \(texto), \(a))")
+    }
+
+    func excluirNovidade(_ id: Int) async throws {
+        try await client.query("DELETE FROM novidades WHERE id = \(id)")
+    }
+
+    // MARK: Favoritos
+    func isFavorito(_ c: Campanha) async throws -> Bool {
+        for try await n in try await client.query(
+            "SELECT count(*) FROM favoritos WHERE usuario_id = \(usuario?.id ?? 0) AND campanha_id = \(c.id)").decode(Int.self) {
+            return n > 0
+        }
+        return false
+    }
+
+    func alternarFavorito(_ c: Campanha, _ fav: Bool) async throws {
+        let uid = usuario?.id ?? 0
+        if fav { try await client.query("INSERT INTO favoritos VALUES (\(uid), \(c.id)) ON CONFLICT DO NOTHING") }
+        else { try await client.query("DELETE FROM favoritos WHERE usuario_id = \(uid) AND campanha_id = \(c.id)") }
+    }
+
+    // MARK: Denúncias, saques, verificação ONG, notificações (RF08/RF11/RF12/RF13)
+    func denunciar(_ c: Campanha, motivo: String) async throws {
+        try await client.query("INSERT INTO denuncias (campanha_id, autor_id, motivo) VALUES (\(c.id), \(usuario?.id ?? 0), \(motivo))")
+    }
+
+    func solicitarSaque(_ c: Campanha) async throws {
+        try await client.query("INSERT INTO saques (campanha_id, valor) VALUES (\(c.id), \(c.arrecadado))")
+    }
+
+    func solicitarVerificacao(documento: String) async throws {
+        try await client.query("INSERT INTO verificacoes_ong (usuario_id, documento_url) VALUES (\(usuario?.id ?? 0), \(documento))")
+    }
+
+    func notificacoes() async throws -> [Item] {
+        try await itens("""
+            SELECT id, texto, to_char(criada_em, 'DD/MM HH24:MI'), CASE WHEN lida THEN 'lida' ELSE 'nova' END
+            FROM notificacoes WHERE usuario_id = \(usuario?.id ?? 0) ORDER BY criada_em DESC
+            """)
+    }
+
+    func marcarLidas() async throws {
+        try await client.query("UPDATE notificacoes SET lida = TRUE WHERE usuario_id = \(usuario?.id ?? 0)")
+    }
+
+    // Filas do admin: tabela -> (id, título, detalhe, status)
+    enum Fila: String, CaseIterable { case denuncias, saques, verificacoes_ong }
+
+    func fila(_ f: Fila) async throws -> [Item] {
+        switch f {
+        case .denuncias: try await itens("""
+            SELECT d.id, c.titulo, d.motivo, d.status FROM denuncias d JOIN campanhas c ON c.id = d.campanha_id ORDER BY d.criada_em DESC
+            """)
+        case .saques: try await itens("""
+            SELECT s.id, c.titulo, 'R$ ' || s.valor, s.status FROM saques s JOIN campanhas c ON c.id = s.campanha_id ORDER BY s.criada_em DESC
+            """)
+        case .verificacoes_ong: try await itens("""
+            SELECT v.id, u.nome, v.documento_url, v.status FROM verificacoes_ong v JOIN usuarios u ON u.id = v.usuario_id ORDER BY v.criada_em DESC
+            """)
+        }
+    }
+
+    func mudarStatus(_ f: Fila, id: Int, _ status: String) async throws {
+        try await client.query(PostgresQuery(unsafeSQL: "UPDATE \(f.rawValue) SET status = $1 WHERE id = $2", binds: try binds(status, id)))
+        if f == .verificacoes_ong && status == "aprovado" {
+            try await client.query("""
+                UPDATE usuarios SET perfil = 'ong', verificado = TRUE
+                WHERE id = (SELECT usuario_id FROM verificacoes_ong WHERE id = \(id))
+                """)
+        }
+    }
+
+    func excluir(_ f: Fila, id: Int) async throws {
+        try await client.query(PostgresQuery(unsafeSQL: "DELETE FROM \(f.rawValue) WHERE id = $1", binds: try binds(id)))
+    }
+
+    private func itens(_ q: PostgresQuery) async throws -> [Item] {
+        var r: [Item] = []
+        for try await (id, t, d, s) in try await client.query(q).decode((Int, String, String, String).self) {
+            r.append(Item(id: id, titulo: t, detalhe: d, status: s))
+        }
+        return r
+    }
+
+    private func binds(_ values: (any PostgresEncodable)?...) throws -> PostgresBindings {
+        var b = PostgresBindings()
+        for v in values {
+            if let v { try b.append(v) } else { b.appendNull() }
+        }
+        return b
+    }
+}
