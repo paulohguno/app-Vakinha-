@@ -1,0 +1,10 @@
+# Dependências e logs do backend
+backend/node_modules/
+backend/*.log
+backend/.env
+
+# macOS / Xcode
+.DS_Store
+xcuserdata/
+DerivedData/
+build/
