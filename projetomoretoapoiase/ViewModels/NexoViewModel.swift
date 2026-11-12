@@ -3,17 +3,18 @@ import Combine
 import SwiftUI
 import CoreLocation
 
-// MARK: - ViewModel Central do Aplicativo Vakinha
+// MARK: - ViewModel Central do Aplicativo NEXO Vakinha (Arquitetura MVVM + Async/Await)
 @MainActor
 public class NexoViewModel: ObservableObject {
     public static let shared = NexoViewModel()
     
-    // Autenticação & Sessão Persistente
+    // Autenticação, Sessão Persistente e Controle de Acesso (RBAC)
     @Published public var currentUser: AppUser?
     @Published public var isAuthenticated: Bool = false
     @Published public var availableUsers: [AppUser] = []
+    @Published public var currentAPIBaseURL: String = AppConfig.shared.apiBaseURL
     
-    // Entidades dos 10 CRUDs puxadas do PostgreSQL (vakinhadb)
+    // Entidades das 11 Tabelas do PostgreSQL (vakinhadb)
     @Published public var campaigns: [CampaignItem] = []
     @Published public var categories: [CategoryItem] = []
     @Published public var donations: [DonationItem] = []
@@ -36,6 +37,21 @@ public class NexoViewModel: ObservableObject {
     public let locationManager = LocationManager.shared
     public let notificationManager = NotificationManager.shared
     
+    // Propriedades Computadas de Controle de Acesso por Papel (RBAC)
+    public var canAccessCreatorDashboard: Bool {
+        guard let role = currentUser?.role else { return false }
+        return role == "Criador" || role == "ONG" || role == "Admin"
+    }
+    
+    public var canAccessAdminONGPanel: Bool {
+        guard let role = currentUser?.role else { return false }
+        return role == "Admin" || role == "ONG"
+    }
+    
+    public var isAdmin: Bool {
+        currentUser?.role == "Admin"
+    }
+    
     public init() {
         restoreSession()
         Task {
@@ -43,9 +59,18 @@ public class NexoViewModel: ObservableObject {
         }
     }
     
-    // MARK: - Persistência Local e Autenticação Segura (CRUD 0)
+    // MARK: - Configuração Dinâmica da URL do Servidor
+    public func updateAPIBaseURL(_ newURL: String) async {
+        AppConfig.shared.apiBaseURL = newURL
+        self.currentAPIBaseURL = AppConfig.shared.apiBaseURL
+        statusMessage = "Endpoint atualizado para \(self.currentAPIBaseURL)"
+        await loadInitialData()
+    }
+    
+    // MARK: - Persistência Local e Autenticação Segura com JWT no Keychain (CRUD 0)
     public func restoreSession() {
-        if let savedUser = SessionManager.shared.loadUserSession() {
+        if let savedUser = SessionManager.shared.loadUserSession(),
+           let token = KeychainHelper.shared.currentJWTToken, !token.isEmpty {
             self.currentUser = savedUser
             self.isAuthenticated = true
         }
@@ -59,13 +84,19 @@ public class NexoViewModel: ObservableObject {
                 let email: String
                 let password: String
             }
-            let response: AuthResponse = try await api.post(endpoint: "auth/login", body: LoginPayload(email: email, password: password))
-            _ = KeychainHelper.shared.save(key: "auth_token", value: response.token)
-            SessionManager.shared.saveUserSession(response.user)
+            let response: AuthResponse = try await api.post(
+                endpoint: "auth/login",
+                body: LoginPayload(email: email, password: password)
+            )
+            SessionManager.shared.saveUserSession(response.user, token: response.token)
             self.currentUser = response.user
             self.isAuthenticated = true
+            self.errorMessage = nil
             self.statusMessage = "Bem-vindo de volta, \(response.user.name)!"
-            notificationManager.sendLocalNotification(title: "Login Realizado", body: "Você está conectado como \(response.user.name).")
+            notificationManager.sendLocalNotification(
+                title: "Login Realizado",
+                body: "Conectado como \(response.user.name) (\(response.user.role))."
+            )
             await refreshUserData()
             return true
         } catch {
@@ -100,12 +131,16 @@ public class NexoViewModel: ObservableObject {
                 state: "SC"
             )
             let response: AuthResponse = try await api.post(endpoint: "auth/register", body: payload)
-            _ = KeychainHelper.shared.save(key: "auth_token", value: response.token)
-            SessionManager.shared.saveUserSession(response.user)
+            SessionManager.shared.saveUserSession(response.user, token: response.token)
             self.currentUser = response.user
             self.isAuthenticated = true
+            self.errorMessage = nil
             self.statusMessage = "Conta criada com sucesso!"
-            notificationManager.sendLocalNotification(title: "Conta Criada", body: "Seja muito bem-vindo ao Vakinha!")
+            notificationManager.sendLocalNotification(
+                title: "Conta Criada",
+                body: "Seja muito bem-vindo ao NEXO Vakinha!"
+            )
+            await fetchUsers()
             await refreshUserData()
             return true
         } catch {
@@ -120,6 +155,9 @@ public class NexoViewModel: ObservableObject {
         self.isAuthenticated = false
         self.favorites = []
         self.notifications = []
+        self.withdrawals = []
+        self.reports = []
+        self.verifications = []
         self.statusMessage = "Sessão encerrada com segurança."
     }
     
@@ -138,9 +176,13 @@ public class NexoViewModel: ObservableObject {
         guard let user = currentUser else { return }
         await fetchFavorites(userId: user.id)
         await fetchNotifications(userId: user.id)
-        await fetchWithdrawals()
-        await fetchReports()
-        await fetchVerifications()
+        if canAccessCreatorDashboard {
+            await fetchWithdrawals()
+        }
+        if canAccessAdminONGPanel {
+            await fetchReports()
+            await fetchVerifications()
+        }
     }
     
     // MARK: - 1. Campanhas CRUD
@@ -163,12 +205,27 @@ public class NexoViewModel: ObservableObject {
         }
     }
     
-    public func createCampaign(title: String, description: String, goalAmount: Double, categoryId: String?, imageBase64: String? = nil, locationName: String? = nil, lat: Double? = nil, lon: Double? = nil) async -> Bool {
+    public func createCampaign(
+        title: String,
+        description: String,
+        goalAmount: Double,
+        categoryId: String?,
+        imageUrl: String? = nil,
+        imageData: Data? = nil,
+        locationName: String? = nil,
+        lat: Double? = nil,
+        lon: Double? = nil
+    ) async -> Bool {
         guard let user = currentUser else {
             errorMessage = "Faça login para criar uma vaquinha."
             return false
         }
         do {
+            var finalImageURL = imageUrl
+            if let jpegData = imageData {
+                finalImageURL = try await api.uploadImage(jpegData: jpegData)
+            }
+            
             struct NewCampaignPayload: Encodable {
                 let title: String
                 let description: String
@@ -186,7 +243,7 @@ public class NexoViewModel: ObservableObject {
                 goal_amount: goalAmount,
                 category_id: categoryId,
                 creator_id: user.id,
-                image_url: imageBase64,
+                image_url: finalImageURL,
                 location_name: locationName ?? locationManager.cityName,
                 latitude: lat ?? locationManager.userLocation?.coordinate.latitude,
                 longitude: lon ?? locationManager.userLocation?.coordinate.longitude
@@ -194,7 +251,10 @@ public class NexoViewModel: ObservableObject {
             let _: CampaignItem = try await api.post(endpoint: "campaigns", body: payload)
             await fetchCampaigns()
             statusMessage = "Vaquinha publicada com sucesso!"
-            notificationManager.sendLocalNotification(title: "Campanha Criada!", body: "Sua vaquinha \"\(title)\" já está no ar arrecadando.")
+            notificationManager.sendLocalNotification(
+                title: "Campanha Criada!",
+                body: "Sua vaquinha \"\(title)\" já está no ar arrecadando."
+            )
             return true
         } catch {
             errorMessage = "Erro ao criar vaquinha: \(error.localizedDescription)"
@@ -202,7 +262,16 @@ public class NexoViewModel: ObservableObject {
         }
     }
     
-    public func updateCampaign(id: String, title: String, description: String, goalAmount: Double, categoryId: String?, status: String, locationName: String?) async -> Bool {
+    public func updateCampaign(
+        id: String,
+        title: String,
+        description: String,
+        goalAmount: Double,
+        categoryId: String?,
+        status: String,
+        imageUrl: String? = nil,
+        locationName: String?
+    ) async -> Bool {
         do {
             struct UpdateCampaignPayload: Encodable {
                 let title: String
@@ -210,9 +279,18 @@ public class NexoViewModel: ObservableObject {
                 let goal_amount: Double
                 let category_id: String?
                 let status: String
+                let image_url: String?
                 let location_name: String?
             }
-            let payload = UpdateCampaignPayload(title: title, description: description, goal_amount: goalAmount, category_id: categoryId, status: status, location_name: locationName)
+            let payload = UpdateCampaignPayload(
+                title: title,
+                description: description,
+                goal_amount: goalAmount,
+                category_id: categoryId,
+                status: status,
+                image_url: imageUrl,
+                location_name: locationName
+            )
             let _: CampaignItem = try await api.put(endpoint: "campaigns/\(id)", body: payload)
             await fetchCampaigns()
             statusMessage = "Vaquinha atualizada!"
@@ -239,6 +317,8 @@ public class NexoViewModel: ObservableObject {
             var endpoint = "donations"
             if let cid = campaignId {
                 endpoint += "?campaignId=\(cid)"
+            } else if let uid = currentUser?.id {
+                endpoint += "?userId=\(uid)"
             }
             self.donations = try await api.get(endpoint: endpoint)
         } catch {
@@ -259,14 +339,20 @@ public class NexoViewModel: ObservableObject {
                 let payment_method: String
                 let message: String?
             }
-            let payload = DonationPayload(campaign_id: campaignId, user_id: user.id, amount: amount, payment_method: paymentMethod, message: message)
+            let payload = DonationPayload(
+                campaign_id: campaignId,
+                user_id: user.id,
+                amount: amount,
+                payment_method: paymentMethod,
+                message: message
+            )
             let _: DonationItem = try await api.post(endpoint: "donations", body: payload)
             await fetchCampaigns()
             await fetchDonations(for: campaignId)
             await fetchNotifications(userId: user.id)
             statusMessage = "Doação de R$ \(String(format: "%.2f", amount)) realizada com sucesso!"
             notificationManager.sendLocalNotification(
-                title: "Doacao Confirmada!",
+                title: "Doação Confirmada!",
                 body: "Obrigado! Seu apoio de R$ \(String(format: "%.2f", amount)) foi processado via \(paymentMethod)."
             )
             return true
@@ -331,7 +417,12 @@ public class NexoViewModel: ObservableObject {
                 let author_name: String
                 let message: String
             }
-            let payload = MessagePayload(campaign_id: campaignId, user_id: user?.id ?? "usr-anon", author_name: user?.name ?? "Apoiador Anônimo", message: message)
+            let payload = MessagePayload(
+                campaign_id: campaignId,
+                user_id: user?.id ?? "usr-anon",
+                author_name: user?.name ?? "Apoiador Anônimo",
+                message: message
+            )
             let _: WallMessageItem = try await api.post(endpoint: "messages", body: payload)
             await fetchMessages(for: campaignId)
             return true
@@ -369,7 +460,9 @@ public class NexoViewModel: ObservableObject {
             }
             let payload = ReportPayload(campaign_id: campaignId, reporter_id: user?.id ?? "usr-1", reason: reason)
             let _: ReportItem = try await api.post(endpoint: "reports", body: payload)
-            await fetchReports()
+            if canAccessAdminONGPanel {
+                await fetchReports()
+            }
             statusMessage = "Denúncia registrada para análise da moderação."
             return true
         } catch {
@@ -415,7 +508,12 @@ public class NexoViewModel: ObservableObject {
                 let document_number: String
                 let documents_url: String?
             }
-            let payload = NGOPayload(user_id: user.id, organization_name: orgName, document_number: docNumber, documents_url: docsUrl)
+            let payload = NGOPayload(
+                user_id: user.id,
+                organization_name: orgName,
+                document_number: docNumber,
+                documents_url: docsUrl
+            )
             let _: NGOVerificationItem = try await api.post(endpoint: "verifications", body: payload)
             await fetchVerifications()
             statusMessage = "Documentação enviada para homologação do selo de ONG!"
@@ -432,8 +530,12 @@ public class NexoViewModel: ObservableObject {
                 let status: String
                 let notes: String?
             }
-            let _: NGOVerificationItem = try await api.put(endpoint: "verifications/\(id)", body: VerStatusPayload(status: status, notes: notes))
+            let _: NGOVerificationItem = try await api.put(
+                endpoint: "verifications/\(id)",
+                body: VerStatusPayload(status: status, notes: notes)
+            )
             await fetchVerifications()
+            await fetchUsers()
         } catch {
             errorMessage = "Erro ao atualizar verificação: \(error.localizedDescription)"
         }
@@ -483,6 +585,7 @@ public class NexoViewModel: ObservableObject {
     
     // MARK: - 8. Favoritos CRUD
     public func fetchFavorites(userId: String? = nil) async {
+        guard isAuthenticated else { return }
         let uid = userId ?? currentUser?.id ?? "usr-1"
         do {
             self.favorites = try await api.get(endpoint: "favorites?userId=\(uid)")
@@ -505,7 +608,10 @@ public class NexoViewModel: ObservableObject {
                     let user_id: String
                     let campaign_id: String
                 }
-                let _: FavoriteItem? = try? await api.post(endpoint: "favorites", body: FavPayload(user_id: user.id, campaign_id: campaignId))
+                let _: FavoriteItem? = try? await api.post(
+                    endpoint: "favorites",
+                    body: FavPayload(user_id: user.id, campaign_id: campaignId)
+                )
             }
             await fetchFavorites(userId: user.id)
         } catch {
@@ -519,6 +625,7 @@ public class NexoViewModel: ObservableObject {
     
     // MARK: - 9. Solicitações de Saque CRUD
     public func fetchWithdrawals() async {
+        guard isAuthenticated else { return }
         do {
             self.withdrawals = try await api.get(endpoint: "withdrawals")
         } catch {
@@ -567,6 +674,7 @@ public class NexoViewModel: ObservableObject {
     
     // MARK: - 10. Notificações CRUD
     public func fetchNotifications(userId: String? = nil) async {
+        guard isAuthenticated else { return }
         let uid = userId ?? currentUser?.id ?? "usr-1"
         do {
             self.notifications = try await api.get(endpoint: "notifications?userId=\(uid)")
@@ -598,15 +706,14 @@ public class NexoViewModel: ObservableObject {
         }
     }
     
-    // MARK: - Usuários do PostgreSQL
+    // MARK: - Usuários e Alternância Segura de Perfis (com emissão real de JWT)
     public func fetchUsers() async {
         do {
             self.availableUsers = try await api.get(endpoint: "users")
             if self.currentUser == nil, let first = availableUsers.first {
-                self.currentUser = first
-                self.isAuthenticated = true
-                SessionManager.shared.saveUserSession(first)
-                await refreshUserData()
+                await switchUserAsync(user: first)
+            } else if self.currentUser != nil && KeychainHelper.shared.currentJWTToken == nil, let current = self.currentUser {
+                await switchUserAsync(user: current)
             }
         } catch {
             print("Aviso ao buscar usuários: \(error.localizedDescription)")
@@ -614,10 +721,29 @@ public class NexoViewModel: ObservableObject {
     }
     
     public func switchUser(user: AppUser) {
-        self.currentUser = user
-        self.isAuthenticated = true
-        SessionManager.shared.saveUserSession(user)
         Task {
+            await switchUserAsync(user: user)
+        }
+    }
+    
+    public func switchUserAsync(user: AppUser) async {
+        do {
+            struct SwitchPayload: Encodable {
+                let userId: String
+            }
+            let response: AuthResponse = try await api.post(
+                endpoint: "auth/switch-user",
+                body: SwitchPayload(userId: user.id)
+            )
+            SessionManager.shared.saveUserSession(response.user, token: response.token)
+            self.currentUser = response.user
+            self.isAuthenticated = true
+            self.statusMessage = "Perfil alternado para \(response.user.name) (\(response.user.role))."
+            await refreshUserData()
+        } catch {
+            self.currentUser = user
+            self.isAuthenticated = true
+            SessionManager.shared.saveUserSession(user)
             await refreshUserData()
         }
     }

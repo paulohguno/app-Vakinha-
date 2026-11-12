@@ -1,7 +1,7 @@
 import SwiftUI
+import MapKit
 
-// MARK: - Detalhes da Vaquinha
-// Integra: CRUD 1 (Campanha Update/Delete), CRUD 2 (Doação), CRUD 3 (Novidades), CRUD 4 (Mural), CRUD 5 (Denúncia), CRUD 9 (Saque)
+// MARK: - Detalhes da Vaquinha (Com AsyncImage HTTP, Mini-Mapa MapKit, ShareSheet Nativo e Todos os CRUDs)
 struct CampaignDetailView: View {
     @ObservedObject var vm: NexoViewModel
     @State var campaign: CampaignItem
@@ -14,26 +14,33 @@ struct CampaignDetailView: View {
     @State private var showingWithdrawSheet = false
     @State private var showingEditSheet = false
     @State private var showingAuthSheet = false
+    @State private var showingShareSheet = false
     
-    // Nova mensagem mural
+    // Nova mensagem do mural
     @State private var newMessageText = ""
+    
+    private var shareSummaryText: String {
+        """
+        Apoie a campanha "\(campaign.title)" no NEXO Vakinha!
+        Arrecadado: R$ \(String(format: "%.2f", campaign.currentAmount)) de R$ \(String(format: "%.2f", campaign.goalAmount)) (\(campaign.percentFormatted))
+        Local: \(campaign.locationName ?? "Brasil")
+        \(campaign.description)
+        """
+    }
     
     var body: some View {
         List {
-            // Imagem de Capa se houver
-            if let imgBase64 = campaign.imageUrl, let data = Data(base64Encoded: imgBase64), let uiImage = UIImage(data: data) {
-                Section {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(height: 220)
-                        .clipped()
-                        .cornerRadius(12)
-                        .listRowInsets(EdgeInsets())
-                }
+            // 1. Capa com Carregamento Assíncrono Otimizado via URL (Sem Base64 no banco)
+            Section {
+                CategoryCardHeader(
+                    categoryName: campaign.categoryName,
+                    iconName: campaign.categoryIcon,
+                    imageUrl: campaign.imageUrl
+                )
+                .listRowInsets(EdgeInsets())
             }
             
-            // Header e Progresso (60% Branco, 30% Azul, 10% Preto)
+            // 2. Cabeçalho, Progresso e Botões de Ação + Compartilhamento
             Section {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -78,7 +85,7 @@ struct CampaignDetailView: View {
                     }
                     .padding(.top, 4)
                     
-                    // Botão Principal de Doação (30% Azul Apple)
+                    // Botão Principal de Doação
                     Button {
                         if vm.isAuthenticated {
                             showingDonateSheet = true
@@ -94,11 +101,60 @@ struct CampaignDetailView: View {
                         }
                     }
                     .buttonStyle(VakinhaPrimaryButtonStyle())
+                    
+                    // Botão de Compartilhamento Nativo (ShareSheet / UIActivityViewController)
+                    Button {
+                        showingShareSheet = true
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Label("Compartilhar Campanha", systemImage: "square.and.arrow.up")
+                                .fontWeight(.semibold)
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(VakinhaSecondaryButtonStyle())
                 }
                 .padding(.vertical, 4)
             }
             
-            // Ações do Criador (CRUD Update / Saque)
+            // 3. Mapa Interativo Nativo (MapKit) caso a campanha possua Coordenadas GPS
+            if let lat = campaign.latitude, let lon = campaign.longitude {
+                Section("Localização da Causa no Mapa (GPS)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Map(
+                            initialPosition: .region(
+                                MKCoordinateRegion(
+                                    center: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                                    span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+                                )
+                            )
+                        ) {
+                            Marker(campaign.title, coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon))
+                                .tint(.vakinhaBlue)
+                        }
+                        .frame(height: 170)
+                        .cornerRadius(12)
+                        
+                        HStack {
+                            Label(campaign.locationName ?? "Coordenadas Verificadas", systemImage: "location.fill")
+                                .font(.caption)
+                                .foregroundColor(.vakinhaBlackMuted)
+                            Spacer()
+                            let dist = vm.locationManager.distance(to: lat, lon: lon)
+                            if !dist.isEmpty {
+                                Text(dist)
+                                    .font(.caption)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.vakinhaBlue)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            
+            // 4. Ações Restritas ao Criador da Campanha ou Admin
             if campaign.creatorId == vm.currentUser?.id || vm.currentUser?.role == "Admin" {
                 Section("Gerenciamento do Criador") {
                     Button {
@@ -118,13 +174,22 @@ struct CampaignDetailView: View {
                     Button {
                         showingWithdrawSheet = true
                     } label: {
-                        Label("Solicitar Saque (R$ \(String(format: "%.2f", campaign.currentAmount)))", systemImage: "banknote.fill")
+                        Label("Solicitar Saque PIX (R$ \(String(format: "%.2f", campaign.currentAmount)))", systemImage: "banknote.fill")
                             .foregroundColor(.vakinhaBlue)
+                    }
+                    
+                    Button(role: .destructive) {
+                        Task {
+                            await vm.deleteCampaign(id: campaign.id)
+                            dismiss()
+                        }
+                    } label: {
+                        Label("Excluir Vaquinha", systemImage: "trash")
                     }
                 }
             }
             
-            // CRUD 3: Atualizações da Campanha (Novidades / Prestação de Contas)
+            // 5. CRUD 3: Mural de Novidades e Prestação de Contas (Com AsyncImage se houver foto anexada)
             Section("Mural de Novidades (Prestação de Contas)") {
                 if vm.updates.isEmpty {
                     Text("Nenhuma atualização publicada ainda.")
@@ -132,7 +197,7 @@ struct CampaignDetailView: View {
                         .foregroundColor(.vakinhaBlackMuted)
                 } else {
                     ForEach(vm.updates) { upd in
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             Text(upd.title)
                                 .font(.subheadline)
                                 .fontWeight(.bold)
@@ -140,7 +205,21 @@ struct CampaignDetailView: View {
                             Text(upd.content)
                                 .font(.caption)
                                 .foregroundColor(.vakinhaBlackMuted)
+                            
+                            if let updImgURL = AppConfig.shared.resolveImageURL(upd.imageUrl) {
+                                AsyncImage(url: updImgURL) { phase in
+                                    if let image = phase.image {
+                                        image
+                                            .resizable()
+                                            .scaledToFill()
+                                            .frame(height: 150)
+                                            .clipped()
+                                            .cornerRadius(10)
+                                    }
+                                }
+                            }
                         }
+                        .padding(.vertical, 2)
                         .swipeActions {
                             if campaign.creatorId == vm.currentUser?.id || vm.currentUser?.role == "Admin" {
                                 Button(role: .destructive) {
@@ -154,7 +233,7 @@ struct CampaignDetailView: View {
                 }
             }
             
-            // CRUD 2: Histórico de Doações
+            // 6. CRUD 2: Histórico de Doações da Campanha
             Section("Doações Recebidas (\(vm.donations.count))") {
                 if vm.donations.isEmpty {
                     Text("Seja o primeiro a apoiar esta vaquinha!")
@@ -167,7 +246,7 @@ struct CampaignDetailView: View {
                                 .font(.title3)
                                 .foregroundColor(.vakinhaBlue)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(don.userName ?? "Doador Anônimo")
+                                Text(don.userName ?? "Doador Solidário")
                                     .font(.subheadline)
                                     .fontWeight(.medium)
                                     .foregroundColor(.vakinhaBlack)
@@ -188,7 +267,7 @@ struct CampaignDetailView: View {
                 }
             }
             
-            // CRUD 4: Mural de Mensagens de Apoio
+            // 7. CRUD 4: Mural de Mensagens de Apoio
             Section("Mensagens de Apoio (Mural)") {
                 HStack {
                     TextField("Deixe uma mensagem de carinho...", text: $newMessageText)
@@ -229,7 +308,7 @@ struct CampaignDetailView: View {
                 }
             }
             
-            // CRUD 5: Denúncia
+            // 8. CRUD 5: Denunciar Campanha
             Section {
                 Button(role: .destructive) {
                     showingReportSheet = true
@@ -241,7 +320,14 @@ struct CampaignDetailView: View {
         .navigationTitle("Detalhes")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    showingShareSheet = true
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundColor(.vakinhaBlue)
+                }
+                
                 Button {
                     Task { await vm.toggleFavorite(campaignId: campaign.id) }
                 } label: {
@@ -288,10 +374,13 @@ struct CampaignDetailView: View {
         .sheet(isPresented: $showingAuthSheet) {
             AuthView(vm: vm)
         }
+        .sheet(isPresented: $showingShareSheet) {
+            ShareSheet(activityItems: [shareSummaryText])
+        }
     }
 }
 
-// MARK: - Sheet de Doação (CRUD 2: Create)
+// MARK: - Sheet de Doação (CRUD 2: Create — Aciona Trigger PL/pgSQL no PostgreSQL)
 struct DonateSheet: View {
     @ObservedObject var vm: NexoViewModel
     let campaign: CampaignItem
@@ -347,7 +436,12 @@ struct DonateSheet: View {
                     Button {
                         guard let val = Double(amountText.replacingOccurrences(of: ",", with: ".")), val > 0 else { return }
                         Task {
-                            let ok = await vm.makeDonation(campaignId: campaign.id, amount: val, paymentMethod: paymentMethod, message: messageText.isEmpty ? nil : messageText)
+                            let ok = await vm.makeDonation(
+                                campaignId: campaign.id,
+                                amount: val,
+                                paymentMethod: paymentMethod,
+                                message: messageText.isEmpty ? nil : messageText
+                            )
                             if ok {
                                 onComplete()
                                 dismiss()
@@ -374,7 +468,7 @@ struct DonateSheet: View {
     }
 }
 
-// MARK: - Sheet de Atualizações (CRUD 3: Create)
+// MARK: - Sheet de Atualizações / Prestação de Contas (CRUD 3: Create)
 struct NewCampaignUpdateSheet: View {
     @ObservedObject var vm: NexoViewModel
     let campaignId: String
@@ -382,6 +476,7 @@ struct NewCampaignUpdateSheet: View {
     
     @State private var title = ""
     @State private var content = ""
+    @State private var imageUrl = ""
     
     var body: some View {
         NavigationStack {
@@ -390,13 +485,21 @@ struct NewCampaignUpdateSheet: View {
                     TextField("Título (ex: Exames realizados)", text: $title)
                     TextField("Conteúdo da prestação de contas...", text: $content, axis: .vertical)
                         .lineLimit(4...8)
+                    TextField("URL de Foto Comprovante (Opcional)", text: $imageUrl)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
                 }
                 
                 Section {
                     Button("Publicar Novidade") {
                         guard !title.isEmpty && !content.isEmpty else { return }
                         Task {
-                            let ok = await vm.createUpdate(campaignId: campaignId, title: title, content: content)
+                            let ok = await vm.createUpdate(
+                                campaignId: campaignId,
+                                title: title,
+                                content: content,
+                                imageUrl: imageUrl.isEmpty ? nil : imageUrl
+                            )
                             if ok { dismiss() }
                         }
                     }
@@ -425,6 +528,7 @@ struct EditCampaignSheet: View {
     @State private var description: String
     @State private var goal: String
     @State private var status: String
+    @State private var imageUrl: String
     @State private var locationName: String
     
     init(vm: NexoViewModel, campaign: CampaignItem, onComplete: @escaping () -> Void) {
@@ -435,6 +539,7 @@ struct EditCampaignSheet: View {
         _description = State(initialValue: campaign.description)
         _goal = State(initialValue: "\(campaign.goalAmount)")
         _status = State(initialValue: campaign.status)
+        _imageUrl = State(initialValue: campaign.imageUrl ?? "")
         _locationName = State(initialValue: campaign.locationName ?? "")
     }
     
@@ -447,13 +552,16 @@ struct EditCampaignSheet: View {
                         .lineLimit(4...6)
                     TextField("Meta (R$)", text: $goal)
                         .keyboardType(.decimalPad)
+                    TextField("URL da Imagem de Capa", text: $imageUrl)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
                     TextField("Localização", text: $locationName)
                 }
                 
                 Section("Status") {
                     Picker("Status", selection: $status) {
                         Text("Ativa").tag("ativa")
-                        Text("Pausada").tag("pausada")
+                        Text("Concluída").tag("concluida")
                         Text("Encerrada").tag("encerrada")
                     }
                     .pickerStyle(.segmented)
@@ -463,7 +571,16 @@ struct EditCampaignSheet: View {
                     Button("Salvar Alterações") {
                         guard let g = Double(goal.replacingOccurrences(of: ",", with: ".")) else { return }
                         Task {
-                            let ok = await vm.updateCampaign(id: campaign.id, title: title, description: description, goalAmount: g, categoryId: campaign.categoryId, status: status, locationName: locationName.isEmpty ? nil : locationName)
+                            let ok = await vm.updateCampaign(
+                                id: campaign.id,
+                                title: title,
+                                description: description,
+                                goalAmount: g,
+                                categoryId: campaign.categoryId,
+                                status: status,
+                                imageUrl: imageUrl.isEmpty ? nil : imageUrl,
+                                locationName: locationName.isEmpty ? nil : locationName
+                            )
                             if ok {
                                 onComplete()
                                 dismiss()
@@ -537,7 +654,7 @@ struct ReportCampaignSheet: View {
     }
 }
 
-// MARK: - Sheet de Solicitação de Saque (CRUD 9: Create)
+// MARK: - Sheet de Solicitação de Saque PIX (CRUD 9: Create)
 struct RequestWithdrawalSheet: View {
     @ObservedObject var vm: NexoViewModel
     let campaign: CampaignItem
@@ -556,7 +673,7 @@ struct RequestWithdrawalSheet: View {
                         .foregroundColor(.vakinhaBlue)
                 }
                 
-                Section("Dados para Transferência") {
+                Section("Dados para Transferência PIX") {
                     TextField("Valor do Saque (R$)", text: $amountText)
                         .keyboardType(.decimalPad)
                     TextField("Chave PIX (CPF/CNPJ/Email/Telefone)", text: $pixKey)

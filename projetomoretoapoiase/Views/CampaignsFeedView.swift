@@ -1,20 +1,22 @@
 import SwiftUI
 
-// MARK: - Feed Principal de Vaquinhas (Exatamente no Modelo Solicitado + Suporte a Imagens e Categorias)
+// MARK: - Feed Principal de Vaquinhas (Busca, Categorias, MapKit GPS, ShareSheet e AsyncImage)
 struct CampaignsFeedView: View {
     @ObservedObject var vm: NexoViewModel
     @State private var showingCreateModal = false
     @State private var showingCategoryManager = false
     @State private var showingAuthModal = false
     @State private var showingMapView = false
+    @State private var showingSearchField = false
     
     @State private var selectedCampaignForDonate: CampaignItem?
     @State private var selectedCampaignForDetail: CampaignItem?
+    @State private var campaignToShare: CampaignItem?
     
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Header Superior Limpo
+                // Header Superior NEXO Vakinha
                 HStack {
                     HStack(spacing: 6) {
                         Image(systemName: "heart.circle.fill")
@@ -30,6 +32,22 @@ struct CampaignsFeedView: View {
                     Spacer()
                     
                     HStack(spacing: 16) {
+                        // Busca Rápida
+                        Button {
+                            withAnimation {
+                                showingSearchField.toggle()
+                                if !showingSearchField && !vm.searchText.isEmpty {
+                                    vm.searchText = ""
+                                    Task { await vm.fetchCampaigns() }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: showingSearchField ? "magnifyingglass.circle.fill" : "magnifyingglass")
+                                .font(.system(size: 20))
+                                .foregroundColor(showingSearchField ? .vakinhaBlue : .black)
+                        }
+                        
+                        // Mapa de Vaquinhas Próximas (MapKit + GPS)
                         Button {
                             showingMapView = true
                         } label: {
@@ -38,6 +56,7 @@ struct CampaignsFeedView: View {
                                 .foregroundColor(.black)
                         }
                         
+                        // Gerenciador de Categorias
                         Button {
                             showingCategoryManager = true
                         } label: {
@@ -46,6 +65,7 @@ struct CampaignsFeedView: View {
                                 .foregroundColor(.black)
                         }
                         
+                        // Nova Campanha
                         Button {
                             if vm.isAuthenticated {
                                 showingCreateModal = true
@@ -63,9 +83,39 @@ struct CampaignsFeedView: View {
                 .padding(.vertical, 10)
                 .background(Color.white)
                 
+                // Barra de Pesquisa Expansível
+                if showingSearchField {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                        TextField("Buscar por título, causa ou cidade...", text: $vm.searchText)
+                            .textInputAutocapitalization(.never)
+                            .submitLabel(.search)
+                            .onSubmit {
+                                Task { await vm.fetchCampaigns() }
+                            }
+                        if !vm.searchText.isEmpty {
+                            Button {
+                                vm.searchText = ""
+                                Task { await vm.fetchCampaigns() }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(.systemGray6))
+                    .cornerRadius(10)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                    .background(Color.white)
+                }
+                
                 Divider()
                 
-                // Mensagens de Feedback
+                // Banners de Feedback
                 if let msg = vm.statusMessage {
                     StatusBannerView(message: msg, isError: false) {
                         vm.statusMessage = nil
@@ -77,7 +127,7 @@ struct CampaignsFeedView: View {
                     }
                 }
                 
-                // Stories de Categorias no Topo
+                // Barra de Categorias (Stories)
                 InstagramStoriesBarView(
                     categories: vm.categories,
                     selectedCategoryId: vm.selectedCategoryId
@@ -87,15 +137,19 @@ struct CampaignsFeedView: View {
                 }
                 .padding(.vertical, 4)
                 
-                // FEED VERTICAL CONTÍNUO COM O DESIGN EXATO DA IMAGEM
+                // Feed Vertical Contínuo
                 ScrollView {
                     LazyVStack(spacing: 14) {
                         ForEach(vm.campaigns) { campaign in
                             VakinhaVisualCardView(
                                 campaign: campaign,
                                 isFavorite: vm.isFavorite(campaignId: campaign.id),
+                                distanceLabel: vm.locationManager.distance(to: campaign.latitude, lon: campaign.longitude),
                                 onFavoriteToggle: {
                                     Task { await vm.toggleFavorite(campaignId: campaign.id) }
+                                },
+                                onShareTapped: {
+                                    campaignToShare = campaign
                                 },
                                 onDonateTapped: {
                                     if vm.isAuthenticated {
@@ -138,6 +192,11 @@ struct CampaignsFeedView: View {
                         await vm.fetchCampaigns()
                     }
                 }
+            }
+            .sheet(item: $campaignToShare) { cmp in
+                ShareSheet(activityItems: [
+                    "Apoie a vaquinha \"\(cmp.title)\" no NEXO Vakinha!\nMeta: R$ \(String(format: "%.2f", cmp.goalAmount)) (\(cmp.percentFormatted) arrecadado).\nLocal: \(cmp.locationName ?? "Brasil")"
+                ])
             }
             .navigationDestination(item: $selectedCampaignForDetail) { cmp in
                 CampaignDetailView(vm: vm, campaign: cmp)

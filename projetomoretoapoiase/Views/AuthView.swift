@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Tela de Autenticação Segura (Login & Cadastro)
+// MARK: - Tela de Autenticação Segura (Login, Cadastro com Seleção de Papel e Acesso Rápido)
 struct AuthView: View {
     @ObservedObject var vm: NexoViewModel
     @Environment(\.dismiss) var dismiss
@@ -17,7 +17,7 @@ struct AuthView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 24) {
-                    // Logo & Cabeçalho 60/30/10
+                    // Cabeçalho Institucional NEXO Vakinha
                     VStack(spacing: 8) {
                         Image(systemName: "heart.text.square.fill")
                             .resizable()
@@ -25,16 +25,16 @@ struct AuthView: View {
                             .frame(width: 64, height: 64)
                             .foregroundColor(.vakinhaBlue)
                         
-                        Text(isRegisterMode ? "Criar Conta na Vakinha" : "Acesse sua Conta")
+                        Text(isRegisterMode ? "Criar Conta no NEXO" : "Acesse sua Conta")
                             .font(.title2)
                             .fontWeight(.bold)
                             .foregroundColor(.vakinhaBlack)
                         
-                        Text("Pequenas doações, grandes transformações.")
-                            .font(.subheadline)
+                        Text("Autenticação criptografada (scrypt + JWT no Keychain)")
+                            .font(.caption)
                             .foregroundColor(.vakinhaBlackMuted)
                     }
-                    .padding(.top, 20)
+                    .padding(.top, 16)
                     
                     if let err = vm.errorMessage {
                         StatusBannerView(message: err, isError: true) {
@@ -42,20 +42,20 @@ struct AuthView: View {
                         }
                     }
                     
-                    // Formulário
+                    // Formulário Principal
                     VStack(spacing: 16) {
                         if isRegisterMode {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("Nome Completo")
+                                Text("Nome Completo ou Razão Social")
                                     .font(.caption)
                                     .fontWeight(.bold)
                                     .foregroundColor(.vakinhaBlack)
-                                TextField("Seu nome", text: $name)
+                                TextField("Seu nome completo", text: $name)
                                     .textFieldStyle(.roundedBorder)
                             }
                             
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("Tipo de Perfil")
+                                Text("Perfil de Acesso (RBAC)")
                                     .font(.caption)
                                     .fontWeight(.bold)
                                     .foregroundColor(.vakinhaBlack)
@@ -76,6 +76,7 @@ struct AuthView: View {
                             TextField("seu@email.com", text: $email)
                                 .keyboardType(.emailAddress)
                                 .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
                                 .textFieldStyle(.roundedBorder)
                         }
                         
@@ -84,7 +85,7 @@ struct AuthView: View {
                                 .font(.caption)
                                 .fontWeight(.bold)
                                 .foregroundColor(.vakinhaBlack)
-                            SecureField("Mínimo 6 dígitos", text: $password)
+                            SecureField("Mínimo 6 caracteres", text: $password)
                                 .textFieldStyle(.roundedBorder)
                         }
                     }
@@ -93,11 +94,16 @@ struct AuthView: View {
                     .cornerRadius(16)
                     .shadow(color: Color.black.opacity(0.04), radius: 8, y: 3)
                     
-                    // Botão Primário (30% Azul)
+                    // Botão de Submissão (Login ou Cadastro)
                     Button {
                         Task {
                             if isRegisterMode {
-                                let ok = await vm.register(name: name, email: email, password: password, role: selectedRole)
+                                let ok = await vm.register(
+                                    name: name,
+                                    email: email,
+                                    password: password,
+                                    role: selectedRole
+                                )
                                 if ok { dismiss() }
                             } else {
                                 let ok = await vm.login(email: email, password: password)
@@ -110,26 +116,48 @@ struct AuthView: View {
                                 ProgressView()
                                     .tint(.white)
                             } else {
-                                Text(isRegisterMode ? "Cadastrar" : "Entrar")
+                                Text(isRegisterMode ? "Criar Conta e Entrar" : "Entrar com Segurança")
                             }
                         }
                     }
                     .buttonStyle(VakinhaPrimaryButtonStyle())
                     .disabled(email.isEmpty || password.isEmpty || (isRegisterMode && name.isEmpty) || vm.isLoading)
                     
-                    // Alternar Modo Login / Cadastro
+                    // Alternar entre Login e Cadastro
                     Button {
                         withAnimation {
                             isRegisterMode.toggle()
+                            vm.errorMessage = nil
                         }
                     } label: {
-                        Text(isRegisterMode ? "Já tem uma conta? Entrar" : "Ainda não tem conta? Cadastre-se")
+                        Text(isRegisterMode ? "Já possui uma conta? Faça Login" : "Ainda não tem conta? Cadastre-se agora")
                             .font(.footnote)
                             .foregroundColor(.vakinhaBlue)
                             .fontWeight(.semibold)
                     }
+                    
+                    // Credenciais Rápidas do Seed Inicial para Demonstração de RBAC
+                    if !isRegisterMode {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Acesso Rápido (Perfis do Seed PostgreSQL):")
+                                .font(.caption)
+                                .fontWeight(.bold)
+                                .foregroundColor(.vakinhaBlackMuted)
+                            
+                            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                                quickFillButton(label: "Criador (Paulo)", mail: "paulo@vakinha.com")
+                                quickFillButton(label: "Doador (Mariana)", mail: "mariana@vakinha.com")
+                                quickFillButton(label: "ONG (Patas do Bem)", mail: "ong@patasdobem.org")
+                                quickFillButton(label: "Admin (Moderação)", mail: "admin@vakinha.com")
+                            }
+                        }
+                        .padding(14)
+                        .background(Color.vakinhaCardBg)
+                        .cornerRadius(12)
+                    }
                 }
                 .padding(.horizontal, 20)
+                .padding(.bottom, 24)
             }
             .background(Color.vakinhaBackground.ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
@@ -140,5 +168,21 @@ struct AuthView: View {
             }
         }
     }
+    
+    private func quickFillButton(label: String, mail: String) -> some View {
+        Button {
+            self.email = mail
+            self.password = "123456"
+        } label: {
+            Text(label)
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Color.vakinhaBlueLight)
+                .foregroundColor(.vakinhaBlue)
+                .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+    }
 }
-
