@@ -9,7 +9,10 @@ const { pool, initDB } = require('./db');
 
 const app = express();
 const port = parseInt(process.env.PORT || '3000', 10);
-const JWT_SECRET = process.env.JWT_SECRET || 'nexo-vakinha-super-secret-jwt-key-2026-production';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || Buffer.byteLength(JWT_SECRET, 'utf8') < 32) {
+  throw new Error('Configure JWT_SECRET no backend/.env com pelo menos 32 bytes aleatórios.');
+}
 const JWT_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 7; // 7 dias
 
 // Diretório estático para imagens enviadas (substituindo payloads base64 pesados no banco)
@@ -18,7 +21,11 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-app.use(cors());
+const allowedOrigins = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({ origin(origin, callback) {
+  if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+  return callback(new Error('Origem não autorizada pelo CORS'));
+} }));
 app.use(express.json({ limit: '15mb' }));
 app.use('/uploads', express.static(uploadsDir));
 
@@ -306,7 +313,10 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // Troca rápida de perfil para avaliação/demonstração emitindo JWT legítimo para o usuário selecionado
-app.post('/api/auth/switch-user', async (req, res) => {
+app.post('/api/auth/switch-user', authenticateJWT, requireRoles('Admin'), async (req, res) => {
+  if (process.env.NODE_ENV !== 'development' || process.env.ENABLE_DEMO_SWITCH !== 'true') {
+    return res.status(403).json({ error: 'Troca de usuário disponível apenas no ambiente de demonstração.' });
+  }
   try {
     const { userId } = req.body;
     if (!userId) {
@@ -1025,7 +1035,11 @@ app.put('/api/withdrawals/:id', authenticateJWT, requireRoles('Admin'), async (r
 app.delete('/api/withdrawals/:id', authenticateJWT, async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.query('DELETE FROM withdrawal_requests WHERE id = $1', [id]);
+    const result = await pool.query(
+      "DELETE FROM withdrawal_requests WHERE id = $1 AND (creator_id = $2 OR $3 = 'Admin') AND status = 'em_analise' RETURNING id",
+      [id, req.user.sub, req.user.role]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'Solicitação não encontrada, sem permissão ou já processada.' });
     res.json({ success: true, message: 'Solicitação de saque cancelada.' });
   } catch (err) {
     res.status(500).json({ error: err.message });

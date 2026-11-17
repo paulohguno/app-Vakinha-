@@ -398,6 +398,9 @@
 				DEVELOPMENT_ASSET_PATHS = "\"projetomoretoapoiase/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Selecione uma imagem para sua campanha ou perfil.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Tire fotos para sua campanha ou perfil.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Sua localização ajuda a encontrar campanhas próximas.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -426,6 +429,9 @@
 				DEVELOPMENT_ASSET_PATHS = "\"projetomoretoapoiase/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Selecione uma imagem para sua campanha ou perfil.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Tire fotos para sua campanha ou perfil.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Sua localização ajuda a encontrar campanhas próximas.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
